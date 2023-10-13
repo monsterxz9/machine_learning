@@ -31,5 +31,5 @@ for i, frequency in enumerate(frequencies):
     print(f'在 {frequency / 1e9} GHz 频率下：')
     print(f'特征阻抗 (Z0): {float(Z0.real):.2f} ohms')
     print(f'归一化波长 (λg): {lambda_g:.2f} units')
-    end_time = time.time()
-    print(f"Training Time: {end_time-start_time:.2f} seconds")
+end_time = time.time()
+print(f"Training Time: {end_time-start_time:.2f} seconds")
