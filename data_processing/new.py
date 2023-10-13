@@ -1,8 +1,6 @@
-import time
 import skrf as rf
 import numpy as np
 import scipy.constants
-start_time = time.time()
 # 读取S2P文件
 
 s2p_file = r'E:\微带线赛题数据\专题赛数据\s2p\1.s2p'  # 请替换为实际的S2P文件路径
@@ -31,5 +29,4 @@ for i, frequency in enumerate(frequencies):
     print(f'在 {frequency / 1e9} GHz 频率下：')
     print(f'特征阻抗 (Z0): {float(Z0.real):.2f} ohms')
     print(f'归一化波长 (λg): {lambda_g:.2f} units')
-end_time = time.time()
-print(f"Training Time: {end_time-start_time:.2f} seconds")
+
