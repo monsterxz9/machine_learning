@@ -34,17 +34,12 @@ def process_s2p_files(n=0):
         frequencies = network.f
         for j, frequency in enumerate(frequencies):
             s11 = s_params[j, 0, 0]
-            s22 = s_params[j, 1, 1]
             s12 = s_params[j, 0, 1]
-            s21 = s_params[j, 1, 0]
-            Z0 = np.sqrt((1 + s11) * (1 - s22) / (1 - s12 * s21))
-            ZL = Z0 * (1 + s11) / (1 - s11)
-            # 计算在结果数组中的索引
             index = i * len(frequencies) + j
-            result_array[index, 0] = Z0.real
-            result_array[index, 1] = Z0.imag
-            result_array[index, 2] = ZL.real
-            result_array[index, 3] = ZL.imag
+            result_array[index, 0] = s11.real
+            result_array[index, 1] = s11.imag
+            result_array[index, 2] = s12.real
+            result_array[index, 3] = s12.imag
     # 初始化一个新的数组用于存储平均值
     # new_array = np.empty((100000, 4))
     #

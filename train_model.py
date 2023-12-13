@@ -3,7 +3,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense
-from data_processing.preprocessing import get_training_set
+from preprocessing2 import get_training_set
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.regularizers import l2
 import os
@@ -22,7 +22,8 @@ l2_lambda = 0.01  # 你可以根据需要调整lambda的值
 regularizer = l2(l2_lambda)
 def create_model():
     model = Sequential([
-        Dense(512, activation='relu', input_shape=(4,),  kernel_regularizer=regularizer),
+        Dense(1024, activation='relu', input_shape=(4,),  kernel_regularizer=regularizer),
+        Dense(512, activation='relu', kernel_regularizer=regularizer),
         Dense(256, activation='relu', kernel_regularizer=regularizer),
         Dense(128, activation='relu', kernel_regularizer=regularizer),
         Dense(64, activation='relu', kernel_regularizer=regularizer),
@@ -41,7 +42,7 @@ strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
 with strategy.scope():
     models = [create_model() for _ in range(num_models)]
 # 创建保存模型的目录
-model_save_dir = r'E:\program\machine_learning\model'
+model_save_dir = r'E:\program\machine_learning\new_model'
 os.makedirs(model_save_dir, exist_ok=True)
 # 训练所有模型并行
 for i in range(num_models):
