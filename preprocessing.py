@@ -2,6 +2,8 @@ import numpy as np
 import csv
 import os
 import skrf as rf
+
+
 def csv_to_numpy(csv_file_path):
     # 读取CSV文件
     data = []
@@ -12,6 +14,7 @@ def csv_to_numpy(csv_file_path):
     # 转换数据为NumPy数组，并将数据类型设为浮点数
     data_array = np.array(data, dtype=np.float32)
     return data_array
+
 
 def feature_processing():
     csv_file_path = r'E:\mline_size.csv'
@@ -48,17 +51,19 @@ def process_s2p_files(n=0):
     #     new_array[i // 5, :] = np.mean(result_array[i:i+5, :], axis=0)
     Z = np.empty((5000, 4))
     for i in range(5 * (n + 1) - 1, 500000, 100):
-        Z[i//100, 0] = result_array[i, 0]
-        Z[i//100, 1] = result_array[i, 1]
-        Z[i//100, 2] = result_array[i, 2]
-        Z[i//100, 3] = result_array[i, 3]
+        Z[i // 100, 0] = result_array[i, 0]
+        Z[i // 100, 1] = result_array[i, 1]
+        Z[i // 100, 2] = result_array[i, 2]
+        Z[i // 100, 3] = result_array[i, 3]
     return Z
+
 
 def get_training_set(n):
     # 从CSV文件获取x
     x = feature_processing()
     Z = process_s2p_files(n)
     return x, Z
+
 
 # 示例用法
 if __name__ == "__main__":
