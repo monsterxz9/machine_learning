@@ -1,4 +1,4 @@
-from data_processing.preprocessing import get_training_set
+from preprocessing2 import get_training_set
 import matplotlib.pyplot as plt  
 import numpy as np  
 X, y = get_training_set(0)
