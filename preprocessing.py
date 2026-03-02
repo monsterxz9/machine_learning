@@ -1,76 +1,137 @@
+"""
+数据预处理模块。
+负责读取 CSV 特征数据和 S2P 散射参数文件，并进行标准化处理。
+支持单模型（频率作为输入）和多模型两种数据管线。
+"""
+
 import numpy as np
 import csv
 import os
 import skrf as rf
 
+from config import (
+    FEATURE_CSV_PATH,
+    TRAIN_S2P_DIR,
+    NUM_S2P_FILES,
+    POINTS_PER_FILE,
+    TOTAL_POINTS,
+)
+
 
 def csv_to_numpy(csv_file_path):
-    # 读取CSV文件
+    """读取 CSV 文件并转换为 NumPy 浮点数组。"""
     data = []
-    with open(csv_file_path, 'r') as file:
+    with open(csv_file_path, "r") as file:
         csv_reader = csv.reader(file)
         for row in csv_reader:
             data.append(row)
-    # 转换数据为NumPy数组，并将数据类型设为浮点数
-    data_array = np.array(data, dtype=np.float32)
-    return data_array
+    return np.array(data, dtype=np.float32)
 
 
-def feature_processing():
-    csv_file_path = r'E:\mline_size.csv'
+def feature_processing(csv_file_path=FEATURE_CSV_PATH):
+    """读取特征 CSV 并进行 Z-Score 标准化，返回 (标准化数据, 均值, 标准差)。"""
     data = csv_to_numpy(csv_file_path)
     data_mean = data.mean(axis=0)
     data_std = data.std(axis=0)
-    data = (data - data_mean) / data_std
-    return data
+    normalized = (data - data_mean) / data_std
+    return normalized, data_mean, data_std
 
 
-def process_s2p_files(n=0):
-    # 获取 S2P 文件列表
-    s2p_files = [os.path.join(r'E:\微带线赛题数据\专题赛数据\s2p', f'{i}.s2p') for i in range(1, 5001)]
-    # 初始化一个空的结果数组
-    result_array = np.empty((500000, 4))
-    # 读取每个S2P文件并计算特征阻抗 Z0 和负载阻抗 ZL
+def _load_all_s2p_data(s2p_dir=TRAIN_S2P_DIR):
+    """
+    读取所有 S2P 文件，提取全部频率点的 S11 和 S12 参数。
+
+    返回:
+        result_array: shape (TOTAL_POINTS, 4) 的数组
+        freqs: shape (POINTS_PER_FILE,) 的频率数组
+    """
+    s2p_files = [
+        os.path.join(s2p_dir, f"{i}.s2p") for i in range(1, NUM_S2P_FILES + 1)
+    ]
+
+    result_array = np.empty((TOTAL_POINTS, 4))
+    freqs = None
+
     for i, s2p_file in enumerate(s2p_files):
         network = rf.Network(s2p_file)
         s_params = network.s
-        frequencies = network.f
-        for j, frequency in enumerate(frequencies):
+        if freqs is None:
+            freqs = network.f
+        for j in range(len(network.f)):
             s11 = s_params[j, 0, 0]
             s12 = s_params[j, 0, 1]
-            index = i * len(frequencies) + j
+            index = i * len(network.f) + j
             result_array[index, 0] = s11.real
             result_array[index, 1] = s11.imag
             result_array[index, 2] = s12.real
             result_array[index, 3] = s12.imag
-    # 初始化一个新的数组用于存储平均值
-    # new_array = np.empty((100000, 4))
-    #
-    # # 每5行取平均值
-    # for i in range(0, 500000, 5):
-    #     new_array[i // 5, :] = np.mean(result_array[i:i+5, :], axis=0)
-    Z = np.empty((5000, 4))
-    for i in range(5 * (n + 1) - 1, 500000, 100):
-        Z[i // 100, 0] = result_array[i, 0]
-        Z[i // 100, 1] = result_array[i, 1]
-        Z[i // 100, 2] = result_array[i, 2]
-        Z[i // 100, 3] = result_array[i, 3]
-    return Z
+
+    return result_array, freqs
+
+
+def process_s2p_files(n=0, s2p_dir=TRAIN_S2P_DIR):
+    """
+    多模型模式：提取第 n 个频率点对应的 S 参数。
+
+    参数:
+        n: 频率点索引（0 ~ POINTS_PER_FILE-1）
+
+    返回:
+        Z: shape (NUM_S2P_FILES, 4) 的数组
+    """
+    result_array, _ = _load_all_s2p_data(s2p_dir)
+    freq_offset = n % POINTS_PER_FILE
+    indices = np.arange(freq_offset, TOTAL_POINTS, POINTS_PER_FILE)
+    return result_array[indices, :]
 
 
 def get_training_set(n):
-    # 从CSV文件获取x
-    x = feature_processing()
+    """
+    多模型模式：获取第 n 个模型的训练集。
+
+    返回:
+        x: 标准化后的特征数据 shape (NUM_S2P_FILES, 4)
+        Z: 对应频率点的 S 参数标签 shape (NUM_S2P_FILES, 4)
+    """
+    x, _, _ = feature_processing()
     Z = process_s2p_files(n)
     return x, Z
 
 
-# 示例用法
+def get_unified_training_set():
+    """
+    单模型模式：将频率作为第 5 个输入特征，生成完整训练集。
+
+    返回:
+        X: shape (TOTAL_POINTS, 5) — [W, L, H, Er, freq]（均已标准化）
+        Z: shape (TOTAL_POINTS, 4) — [S11.real, S11.imag, S12.real, S12.imag]
+        feat_mean, feat_std: 4 维特征的均值和标准差
+        freq_mean, freq_std: 频率的均值和标准差
+    """
+    features, feat_mean, feat_std = feature_processing()
+
+    # 加载全量 S 参数数据和频率
+    Z, freqs = _load_all_s2p_data()
+    freq_mean = freqs.mean()
+    freq_std = freqs.std()
+    freq_normalized = (freqs - freq_mean) / freq_std
+
+    # 构建 X：每个样本的 4 特征重复 POINTS_PER_FILE 次，拼接对应频率
+    X_feat = np.repeat(features, len(freqs), axis=0)       # (TOTAL_POINTS, 4)
+    freq_col = np.tile(freq_normalized, len(features))      # (TOTAL_POINTS,)
+    X = np.column_stack([X_feat, freq_col])                 # (TOTAL_POINTS, 5)
+
+    return X, Z, feat_mean, feat_std, freq_mean, freq_std
+
+
 if __name__ == "__main__":
-    # 调用get_training_set方法获取x
-    x, Z = get_training_set(0)
-    # 打印x, t的内容
-    print("x (CSV数据):")
-    print(x)
-    print("R (s2p数据):")
-    print(Z)
+    from config import MODEL_MODE
+
+    if MODEL_MODE == "single":
+        X, Z, fm, fs, frm, frs = get_unified_training_set()
+        print(f"单模型 - X shape: {X.shape}, Z shape: {Z.shape}")
+        print(f"特征均值: {fm}, 特征标准差: {fs}")
+        print(f"频率均值: {frm:.2f}, 频率标准差: {frs:.2f}")
+    else:
+        x, Z = get_training_set(0)
+        print(f"多模型 - x shape: {x.shape}, Z shape: {Z.shape}")
