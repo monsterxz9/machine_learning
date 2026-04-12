@@ -24,3 +24,8 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+.venv/
+*.npz
+*.zip
+微带线赛题数据/

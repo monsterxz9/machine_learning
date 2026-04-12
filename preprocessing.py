@@ -23,14 +23,23 @@ def csv_to_numpy(csv_file_path):
     data = []
     with open(csv_file_path, "r") as file:
         csv_reader = csv.reader(file)
-        for row in csv_reader:
-            data.append(row)
+        for row_idx, row in enumerate(csv_reader):
+            if not row:
+                continue
+            try:
+                data.append([float(value) for value in row])
+            except ValueError:
+                if row_idx == 0:
+                    continue
+                raise
     return np.array(data, dtype=np.float32)
 
 
 def feature_processing(csv_file_path=FEATURE_CSV_PATH):
     """读取特征 CSV 并进行 Z-Score 标准化，返回 (标准化数据, 均值, 标准差)。"""
     data = csv_to_numpy(csv_file_path)
+    if data.shape[1] > 4:
+        data = data[:, :4]
     data_mean = data.mean(axis=0)
     data_std = data.std(axis=0)
     normalized = (data - data_mean) / data_std
@@ -45,9 +54,7 @@ def _load_all_s2p_data(s2p_dir=TRAIN_S2P_DIR):
         result_array: shape (TOTAL_POINTS, 4) 的数组
         freqs: shape (POINTS_PER_FILE,) 的频率数组
     """
-    s2p_files = [
-        os.path.join(s2p_dir, f"{i}.s2p") for i in range(1, NUM_S2P_FILES + 1)
-    ]
+    s2p_files = [os.path.join(s2p_dir, f"{i}.s2p") for i in range(1, NUM_S2P_FILES + 1)]
 
     result_array = np.empty((TOTAL_POINTS, 4))
     freqs = None
@@ -112,14 +119,16 @@ def get_unified_training_set():
 
     # 加载全量 S 参数数据和频率
     Z, freqs = _load_all_s2p_data()
+    if freqs is None:
+        raise ValueError("S2P 频率数据为空")
     freq_mean = freqs.mean()
     freq_std = freqs.std()
     freq_normalized = (freqs - freq_mean) / freq_std
 
     # 构建 X：每个样本的 4 特征重复 POINTS_PER_FILE 次，拼接对应频率
-    X_feat = np.repeat(features, len(freqs), axis=0)       # (TOTAL_POINTS, 4)
-    freq_col = np.tile(freq_normalized, len(features))      # (TOTAL_POINTS,)
-    X = np.column_stack([X_feat, freq_col])                 # (TOTAL_POINTS, 5)
+    X_feat = np.repeat(features, len(freqs), axis=0)  # (TOTAL_POINTS, 4)
+    freq_col = np.tile(freq_normalized, len(features))  # (TOTAL_POINTS,)
+    X = np.column_stack([X_feat, freq_col])  # (TOTAL_POINTS, 5)
 
     return X, Z, feat_mean, feat_std, freq_mean, freq_std
 
