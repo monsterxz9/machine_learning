@@ -70,9 +70,9 @@ def train_one_epoch(
     model.train()
     total, n = 0.0, 0
     for geo, freq, target in loader:
-        geo = geo.to(device, non_blocking=True)
-        freq = freq.to(device, non_blocking=True)
-        target = target.to(device, non_blocking=True)
+        geo = geo.to(device)
+        freq = freq.to(device)
+        target = target.to(device)
         optimizer.zero_grad()
         pred = model(geo, freq)
         loss = loss_fn(pred, target)
@@ -94,9 +94,9 @@ def eval_loss(
     model.eval()
     total, n = 0.0, 0
     for geo, freq, target in loader:
-        geo = geo.to(device, non_blocking=True)
-        freq = freq.to(device, non_blocking=True)
-        target = target.to(device, non_blocking=True)
+        geo = geo.to(device)
+        freq = freq.to(device)
+        target = target.to(device)
         pred = model(geo, freq)
         bs = geo.size(0)
         total += loss_fn(pred, target).item() * bs

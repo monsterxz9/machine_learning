@@ -14,8 +14,8 @@ model/*.pt
 *.npz
 *.png
 
-# 数据
-data/
+# 数据(目录或软链)
+data
 *.zip
 微带线赛题数据/
 
