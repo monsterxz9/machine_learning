@@ -4,6 +4,7 @@ __pycache__/
 
 # 训练模型文件（体积较大）
 model/*.h5
+model/*.pt
 
 # 生成的图片
 *.png
@@ -29,3 +30,7 @@ Thumbs.db
 *.npz
 *.zip
 微带线赛题数据/
+
+# pytest / ruff caches
+.pytest_cache/
+.ruff_cache/

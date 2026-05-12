@@ -1,33 +1,36 @@
 """
-数据预处理模块。
-负责读取 CSV 特征数据和 S2P 散射参数文件，并进行标准化处理。
-支持单模型（频率作为输入）和多模型两种数据管线。
+数据预处理:
+- 读 CSV 特征 + .s2p 文件
+- Z-Score 标准化
+- 按几何样本随机切分 train/val,构造 PyTorch Dataset
 """
 
-import numpy as np
 import csv
 import os
+
+import numpy as np
 import skrf as rf
+import torch
+from torch.utils.data import Dataset
 
 from config import (
     FEATURE_CSV_PATH,
-    TRAIN_S2P_DIR,
     NUM_S2P_FILES,
     POINTS_PER_FILE,
-    TOTAL_POINTS,
+    TRAIN_S2P_DIR,
 )
 
 
-def csv_to_numpy(csv_file_path):
-    """读取 CSV 文件并转换为 NumPy 浮点数组。"""
-    data = []
-    with open(csv_file_path, "r") as file:
-        csv_reader = csv.reader(file)
-        for row_idx, row in enumerate(csv_reader):
+def csv_to_numpy(csv_path: str) -> np.ndarray:
+    """读 CSV 为 float32 数组,跳过非数字 header。"""
+    data: list[list[float]] = []
+    with open(csv_path, "r") as f:
+        reader = csv.reader(f)
+        for row_idx, row in enumerate(reader):
             if not row:
                 continue
             try:
-                data.append([float(value) for value in row])
+                data.append([float(v) for v in row])
             except ValueError:
                 if row_idx == 0:
                     continue
@@ -35,112 +38,114 @@ def csv_to_numpy(csv_file_path):
     return np.array(data, dtype=np.float32)
 
 
-def feature_processing(csv_file_path=FEATURE_CSV_PATH):
-    """读取特征 CSV 并进行 Z-Score 标准化，返回 (标准化数据, 均值, 标准差)。"""
-    data = csv_to_numpy(csv_file_path)
+def load_features(csv_path: str = FEATURE_CSV_PATH) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """读特征 CSV(只取前 4 列)并 Z-Score 标准化。返回 (normalized, mean, std)。"""
+    data = csv_to_numpy(csv_path)
     if data.shape[1] > 4:
         data = data[:, :4]
-    data_mean = data.mean(axis=0)
-    data_std = data.std(axis=0)
-    normalized = (data - data_mean) / data_std
-    return normalized, data_mean, data_std
+    mean = data.mean(axis=0)
+    std = data.std(axis=0)
+    normalized = (data - mean) / std
+    return normalized.astype(np.float32), mean.astype(np.float32), std.astype(np.float32)
 
 
-def _load_all_s2p_data(s2p_dir=TRAIN_S2P_DIR):
+def load_all_s2p(s2p_dir: str = TRAIN_S2P_DIR) -> tuple[np.ndarray, np.ndarray]:
     """
-    读取所有 S2P 文件，提取全部频率点的 S11 和 S12 参数。
+    读取所有训练 .s2p,提取 S11/S12 实部虚部及频率列表。
 
     返回:
-        result_array: shape (TOTAL_POINTS, 4) 的数组
-        freqs: shape (POINTS_PER_FILE,) 的频率数组
+        s_params: (NUM_S2P_FILES, POINTS_PER_FILE, 4) [S11.real, S11.imag, S12.real, S12.imag]
+        freqs:    (POINTS_PER_FILE,)
     """
-    s2p_files = [os.path.join(s2p_dir, f"{i}.s2p") for i in range(1, NUM_S2P_FILES + 1)]
+    s_params = np.empty((NUM_S2P_FILES, POINTS_PER_FILE, 4), dtype=np.float32)
+    freqs: np.ndarray | None = None
 
-    result_array = np.empty((TOTAL_POINTS, 4))
-    freqs = None
-
-    for i, s2p_file in enumerate(s2p_files):
-        network = rf.Network(s2p_file)
-        s_params = network.s
+    for i in range(NUM_S2P_FILES):
+        path = os.path.join(s2p_dir, f"{i + 1}.s2p")
+        net = rf.Network(path)
         if freqs is None:
-            freqs = network.f
-        for j in range(len(network.f)):
-            s11 = s_params[j, 0, 0]
-            s12 = s_params[j, 0, 1]
-            index = i * len(network.f) + j
-            result_array[index, 0] = s11.real
-            result_array[index, 1] = s11.imag
-            result_array[index, 2] = s12.real
-            result_array[index, 3] = s12.imag
+            freqs = net.f.astype(np.float32)
+        s = net.s  # (P, 2, 2) complex
+        s_params[i, :, 0] = s[:, 0, 0].real
+        s_params[i, :, 1] = s[:, 0, 0].imag
+        s_params[i, :, 2] = s[:, 0, 1].real
+        s_params[i, :, 3] = s[:, 0, 1].imag
 
-    return result_array, freqs
+    assert freqs is not None
+    return s_params, freqs
 
 
-def process_s2p_files(n=0, s2p_dir=TRAIN_S2P_DIR):
+class MicrostripDataset(Dataset):
     """
-    多模型模式：提取第 n 个频率点对应的 S 参数。
+    展平 (sample, freq) 为一维样本,每条数据 = (geo, freq, S_target)。
 
-    参数:
-        n: 频率点索引（0 ~ POINTS_PER_FILE-1）
-
-    返回:
-        Z: shape (NUM_S2P_FILES, 4) 的数组
+    Args:
+        geo: (N, 4) 标准化几何参数
+        freq_normalized: (P,) 标准化频率
+        s_params: (N, P, 4) S 参数标签(实部虚部)
     """
-    result_array, _ = _load_all_s2p_data(s2p_dir)
-    freq_offset = n % POINTS_PER_FILE
-    indices = np.arange(freq_offset, TOTAL_POINTS, POINTS_PER_FILE)
-    return result_array[indices, :]
+
+    def __init__(self, geo: np.ndarray, freq_normalized: np.ndarray, s_params: np.ndarray) -> None:
+        assert geo.shape[0] == s_params.shape[0]
+        assert freq_normalized.shape[0] == s_params.shape[1]
+        self.geo = torch.from_numpy(geo).float()
+        self.freq = torch.from_numpy(freq_normalized).float()
+        self.s = torch.from_numpy(s_params).float()
+        self.n_samples, self.n_freqs = s_params.shape[:2]
+
+    def __len__(self) -> int:
+        return self.n_samples * self.n_freqs
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        sample_idx, freq_idx = divmod(idx, self.n_freqs)
+        return (
+            self.geo[sample_idx],
+            self.freq[freq_idx],
+            self.s[sample_idx, freq_idx],
+        )
 
 
-def get_training_set(n):
+def build_datasets(
+    seed: int = 42,
+    val_ratio: float = 0.2,
+) -> tuple[MicrostripDataset, MicrostripDataset, dict]:
     """
-    多模型模式：获取第 n 个模型的训练集。
+    构造训练/验证 Dataset。**按几何样本切分**,避免同一几何的
+    频率点跨越训练/验证集造成数据泄漏。
 
-    返回:
-        x: 标准化后的特征数据 shape (NUM_S2P_FILES, 4)
-        Z: 对应频率点的 S 参数标签 shape (NUM_S2P_FILES, 4)
+    返回 (train_ds, val_ds, stats_dict)
     """
-    x, _, _ = feature_processing()
-    Z = process_s2p_files(n)
-    return x, Z
+    geo, geo_mean, geo_std = load_features()
+    s_params, freqs = load_all_s2p()
 
+    freq_mean = float(freqs.mean())
+    freq_std = float(freqs.std())
+    freq_norm = ((freqs - freq_mean) / freq_std).astype(np.float32)
 
-def get_unified_training_set():
-    """
-    单模型模式：将频率作为第 5 个输入特征，生成完整训练集。
+    rng = np.random.default_rng(seed)
+    n = geo.shape[0]
+    indices = np.arange(n)
+    rng.shuffle(indices)
+    n_val = int(n * val_ratio)
+    val_idx, train_idx = indices[:n_val], indices[n_val:]
 
-    返回:
-        X: shape (TOTAL_POINTS, 5) — [W, L, H, Er, freq]（均已标准化）
-        Z: shape (TOTAL_POINTS, 4) — [S11.real, S11.imag, S12.real, S12.imag]
-        feat_mean, feat_std: 4 维特征的均值和标准差
-        freq_mean, freq_std: 频率的均值和标准差
-    """
-    features, feat_mean, feat_std = feature_processing()
+    train_ds = MicrostripDataset(geo[train_idx], freq_norm, s_params[train_idx])
+    val_ds = MicrostripDataset(geo[val_idx], freq_norm, s_params[val_idx])
 
-    # 加载全量 S 参数数据和频率
-    Z, freqs = _load_all_s2p_data()
-    if freqs is None:
-        raise ValueError("S2P 频率数据为空")
-    freq_mean = freqs.mean()
-    freq_std = freqs.std()
-    freq_normalized = (freqs - freq_mean) / freq_std
-
-    # 构建 X：每个样本的 4 特征重复 POINTS_PER_FILE 次，拼接对应频率
-    X_feat = np.repeat(features, len(freqs), axis=0)  # (TOTAL_POINTS, 4)
-    freq_col = np.tile(freq_normalized, len(features))  # (TOTAL_POINTS,)
-    X = np.column_stack([X_feat, freq_col])  # (TOTAL_POINTS, 5)
-
-    return X, Z, feat_mean, feat_std, freq_mean, freq_std
+    stats = {
+        "geo_mean": geo_mean,
+        "geo_std": geo_std,
+        "freq_mean": np.array(freq_mean, dtype=np.float32),
+        "freq_std": np.array(freq_std, dtype=np.float32),
+    }
+    return train_ds, val_ds, stats
 
 
 if __name__ == "__main__":
-    from config import MODEL_MODE
-
-    if MODEL_MODE == "single":
-        X, Z, fm, fs, frm, frs = get_unified_training_set()
-        print(f"单模型 - X shape: {X.shape}, Z shape: {Z.shape}")
-        print(f"特征均值: {fm}, 特征标准差: {fs}")
-        print(f"频率均值: {frm:.2f}, 频率标准差: {frs:.2f}")
-    else:
-        x, Z = get_training_set(0)
-        print(f"多模型 - x shape: {x.shape}, Z shape: {Z.shape}")
+    train_ds, val_ds, stats = build_datasets()
+    print(f"Train: {len(train_ds):,} samples | Val: {len(val_ds):,} samples")
+    print(f"Geo mean: {stats['geo_mean']}")
+    print(f"Geo std:  {stats['geo_std']}")
+    print(f"Freq mean/std: {float(stats['freq_mean']):.2f} / {float(stats['freq_std']):.2f}")
+    geo, freq, s = train_ds[0]
+    print(f"Sample 0 - geo: {geo.shape}, freq: {freq.shape}, S: {s.shape}")

@@ -1,195 +1,122 @@
-"""
-模型评估模块。
-加载训练好的模型，对测试数据进行预测并计算误差。
-支持单模型和多模型两种评估管线。
-
-重要修复：模型预测值直接就是 S 参数（S11.real, S11.imag, S12.real, S12.imag），
-不需要再做阻抗→S 参数的转换。
-"""
+"""评估:加载训练好的模型,在测试集上推理 + 画对比图。"""
 
 import os
-import numpy as np
-import tensorflow as tf
+
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
 
-from config import (
-    MODEL_MODE,
-    MODEL_DIR,
-    NUM_MODELS,
-    NUM_TEST_CASES,
-    SINGLE_MODEL_PATH,
-    NORMALIZATION_STATS_PATH,
-)
-from get_test_data import (
-    import_test_data,
-    import_s2p_data,
-    import_s2p_data_all_freqs,
-    feature_of_data,
-)
+from config import MODEL_DIR, MODEL_PATH, NORM_STATS_PATH, NUM_TEST_CASES
+from get_test_data import load_test_features, load_test_s_params
+from model import MicrostripMLP
 
 
-# ==================== 预测函数 ====================
+LABELS = ["S11.real", "S11.imag", "S12.real", "S12.imag"]
 
 
-def predict_to_s_params(predictions):
-    """将模型原始预测 (N, 4) 转换为复数 S 参数。
+def load_model(path: str = MODEL_PATH) -> MicrostripMLP:
+    """加载 checkpoint,根据保存的 config 实例化模型。"""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    model = MicrostripMLP(**ckpt["config"])
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+    return model
 
-    模型输出列: [S11.real, S11.imag, S12.real, S12.imag]
-    对于互易网络: S21 = S12, S22 = S11
+
+def load_stats(path: str = NORM_STATS_PATH) -> dict:
+    npz = np.load(path)
+    return {
+        "geo_mean": npz["geo_mean"],
+        "geo_std": npz["geo_std"],
+        "freq_mean": float(npz["freq_mean"]),
+        "freq_std": float(npz["freq_std"]),
+    }
+
+
+@torch.no_grad()
+def predict_all(
+    model: MicrostripMLP,
+    stats: dict,
+    features: np.ndarray,
+    freqs: np.ndarray,
+) -> np.ndarray:
     """
-    s11 = predictions[:, 0] + 1j * predictions[:, 1]
-    s12 = predictions[:, 2] + 1j * predictions[:, 3]
-    return s11, s12, s12, s11
+    对 (N 个测试样本) × (P 个频率点) 全部预测一遍。
 
-
-def predict_single_model():
+    返回 (N, P, 4) 实部虚部预测。
     """
-    单模型模式：加载统一模型，对所有测试样本和频率点进行预测。
+    feat_norm = (features - stats["geo_mean"]) / stats["geo_std"]
+    freq_norm = (freqs - stats["freq_mean"]) / stats["freq_std"]
 
-    返回:
-        predict: shape (NUM_TEST_CASES, num_freqs, 4) 的实数数组
-                 列为 [S11.real, S11.imag, S12.real, S12.imag]
-    """
-    model = tf.keras.models.load_model(SINGLE_MODEL_PATH)
-    stats = np.load(NORMALIZATION_STATS_PATH)
-    feat_mean, feat_std = stats["feat_mean"], stats["feat_std"]
-    freq_mean, freq_std = float(stats["freq_mean"]), float(stats["freq_std"])
+    feat_t = torch.from_numpy(feat_norm).float()
+    freq_t = torch.from_numpy(freq_norm).float()
+    n, p = feat_t.shape[0], freq_t.shape[0]
 
-    # 加载测试特征并标准化
-    test_features = import_test_data()
-    test_norm = (test_features - feat_mean) / feat_std
-
-    # 获取测试 S2P 的频率列表
-    _, freqs = import_s2p_data_all_freqs()
-    freq_normalized = (freqs - freq_mean) / freq_std
-
-    predict = np.empty((NUM_TEST_CASES, len(freqs), 4))
-    for j, fn in enumerate(freq_normalized):
-        X = np.column_stack([test_norm, np.full(len(test_norm), fn)])
-        pred = model.predict(X, verbose=0)
-        predict[:, j, :] = pred
-
-    return predict
+    # 笛卡尔积展平再批量推理
+    geo_rep = feat_t.unsqueeze(1).expand(n, p, -1).reshape(n * p, -1)
+    freq_rep = freq_t.unsqueeze(0).expand(n, p).reshape(n * p)
+    pred = model(geo_rep, freq_rep).numpy().reshape(n, p, 4)
+    return pred
 
 
-def predict_multi_model():
-    """
-    多模型模式：加载各频率点模型进行预测。
+def plot_case(
+    case_idx: int,
+    true_vals: np.ndarray,
+    pred: np.ndarray,
+    save_dir: str = MODEL_DIR,
+) -> str:
+    """画某个 case 的 true vs pred + 误差曲线,共 4 行(每个 S 分量一行)。"""
+    n_freqs = true_vals.shape[1]
+    x = np.arange(n_freqs)
 
-    返回:
-        predict: shape (NUM_MODELS, NUM_TEST_CASES, 4) 的复数数组
-                 列为 [S11, S12, S21, S22]
-    """
-    test = import_test_data()
-    data_mean, data_std = feature_of_data()
-    test = (test - data_mean) / data_std
+    fig, axes = plt.subplots(4, 2, figsize=(14, 10), sharex=True)
+    for c in range(4):
+        ax_a = axes[c, 0]
+        ax_a.plot(x, true_vals[case_idx, :, c], label="true", linewidth=1.5)
+        ax_a.plot(x, pred[case_idx, :, c], label="pred", linewidth=1.5, linestyle="--")
+        ax_a.set_ylabel(LABELS[c])
+        ax_a.legend(loc="best", fontsize=8)
+        ax_a.grid(alpha=0.3)
 
-    predict = np.empty((NUM_MODELS, NUM_TEST_CASES, 4), dtype=complex)
-    for i in range(1, NUM_MODELS + 1):
-        model_path = os.path.join(MODEL_DIR, f"model_{i}.h5")
-        model = tf.keras.models.load_model(model_path)
-        pred = model.predict(test, verbose=0)
-        s11, s12, s21, s22 = predict_to_s_params(pred)
-        predict[i - 1, :, 0] = s11
-        predict[i - 1, :, 1] = s12
-        predict[i - 1, :, 2] = s21
-        predict[i - 1, :, 3] = s22
-    return predict
+        ax_e = axes[c, 1]
+        err = true_vals[case_idx, :, c] - pred[case_idx, :, c]
+        ax_e.plot(x, err, color="red", linewidth=1)
+        ax_e.set_ylabel(f"{LABELS[c]} err")
+        ax_e.axhline(0, color="black", linewidth=0.5)
+        ax_e.grid(alpha=0.3)
 
-
-# ==================== 误差计算 ====================
-
-
-def calculate_error_single():
-    """单模型模式：计算所有频率点的绝对和相对误差。"""
-    true_values, _ = import_s2p_data_all_freqs()  # (NUM_TEST_CASES, num_freqs, 4)
-    predict = predict_single_model()               # (NUM_TEST_CASES, num_freqs, 4)
-    absolute_error = true_values - predict
-    relative_error = np.where(
-        np.abs(true_values) > 1e-10,
-        absolute_error / true_values,
-        0.0,
-    )
-    return absolute_error, relative_error
-
-
-def calculate_error_multi():
-    """多模型模式：计算绝对和相对误差。"""
-    true_values = import_s2p_data()  # (NUM_TEST_CASES, 4)
-    predict = predict_multi_model()   # (NUM_MODELS, NUM_TEST_CASES, 4)
-    absolute_error = true_values - predict
-    relative_error = np.where(
-        np.abs(true_values) > 1e-10,
-        absolute_error / true_values,
-        0.0,
-    )
-    return absolute_error, relative_error
-
-
-# ==================== 可视化 ====================
-
-
-def draw_picture_single(case_idx, absolute_error, relative_error):
-    """单模型模式：绘制某个测试样本在所有频率上的误差。"""
-    num_freqs = absolute_error.shape[1]
-    x_axis = np.arange(num_freqs)
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-
-    for col in range(4):
-        ax1.plot(x_axis, absolute_error[case_idx, :, col], label=f"col{col}")
-    ax1.set_title(f"Case {case_idx + 1} - Absolute Error")
-    ax1.set_xlabel("Frequency Index")
-    ax1.legend()
-
-    for col in range(4):
-        ax2.plot(x_axis, relative_error[case_idx, :, col], label=f"col{col}")
-    ax2.set_title(f"Case {case_idx + 1} - Relative Error")
-    ax2.set_xlabel("Frequency Index")
-    ax2.legend()
-
+    axes[-1, 0].set_xlabel("Frequency index")
+    axes[-1, 1].set_xlabel("Frequency index")
+    fig.suptitle(f"Case {case_idx + 1}: prediction vs ground truth")
     plt.tight_layout()
-    plt.savefig(f"case_{case_idx + 1}_error.png")
+
+    out = os.path.join(save_dir, f"case_{case_idx + 1}_eval.png")
+    plt.savefig(out)
     plt.close(fig)
+    return out
 
 
-def draw_picture_multi(model_idx, absolute_error, relative_error):
-    """多模型模式：绘制某个模型在所有测试样本上的误差。"""
-    x_axis = np.arange(1, NUM_TEST_CASES + 1)
+def main() -> None:
+    print("Loading model + stats...")
+    model = load_model()
+    stats = load_stats()
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+    print("Loading test data...")
+    features = load_test_features()
+    true_s, freqs = load_test_s_params()
+    print(f"Cases: {features.shape[0]}, Freqs: {freqs.shape[0]}")
 
-    for i in range(2):
-        ax1.scatter(x_axis, np.real(absolute_error[model_idx, :, i]), marker=".", c="r", label="real" if i == 0 else "")
-        ax1.scatter(x_axis, np.imag(absolute_error[model_idx, :, i]), marker=".", c="b", label="imag" if i == 0 else "")
-    ax1.set_title(f"Model {model_idx + 1} - Absolute Error")
-    ax1.legend()
+    pred = predict_all(model, stats, features, freqs)
 
-    for i in range(2):
-        ax2.scatter(x_axis, np.real(relative_error[model_idx, :, i]), marker=".", c="r")
-        ax2.scatter(x_axis, np.imag(relative_error[model_idx, :, i]), marker=".", c="b")
-    ax2.set_title(f"Model {model_idx + 1} - Relative Error")
-    ax2.set_xlabel("Test Case")
+    mse = float(((true_s - pred) ** 2).mean())
+    mae = float(np.abs(true_s - pred).mean())
+    print(f"Test MSE: {mse:.6f}")
+    print(f"Test MAE: {mae:.6f}")
 
-    plt.tight_layout()
-    plt.savefig(f"model_{model_idx + 1}_error.png")
-    plt.close(fig)
-
-
-def draw_all_pictures():
-    """根据模式绘制所有误差图。"""
-    if MODEL_MODE == "single":
-        absolute_error, relative_error = calculate_error_single()
-        for i in range(NUM_TEST_CASES):
-            draw_picture_single(i, absolute_error, relative_error)
-            print(f"已保存 case_{i + 1}_error.png")
-    else:
-        absolute_error, relative_error = calculate_error_multi()
-        for i in range(NUM_MODELS):
-            draw_picture_multi(i, absolute_error, relative_error)
-            print(f"已保存 model_{i + 1}_error.png")
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    for i in range(NUM_TEST_CASES):
+        print(f"Saved: {plot_case(i, true_s, pred)}")
 
 
 if __name__ == "__main__":
-    print(f"评估模式: {MODEL_MODE}")
-    draw_all_pictures()
+    main()

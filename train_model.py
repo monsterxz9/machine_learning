@@ -1,165 +1,177 @@
-"""
-模型训练模块。
-支持单模型（频率作为输入）和多模型两种训练模式。
-通过 MODEL_MODE 配置切换。
-"""
+"""训练入口:统一模型 + Fourier 频率编码 (PyTorch)。"""
 
-import time
 import os
+import time
+
+import matplotlib.pyplot as plt
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.regularizers import l2
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
 
 from config import (
-    MODEL_MODE,
-    MODEL_DIR,
     BATCH_SIZE,
-    MAX_EPOCHS,
     EARLY_STOPPING_PATIENCE,
-    VALIDATION_SPLIT,
+    GEO_DIM,
+    HIDDEN_LAYERS,
     LEARNING_RATE,
-    # 单模型
-    SINGLE_MODEL_PATH,
-    SINGLE_MODEL_LAYERS,
-    SINGLE_INPUT_DIM,
-    SINGLE_L2_LAMBDA,
-    NORMALIZATION_STATS_PATH,
-    # 多模型
-    NUM_MODELS,
-    MULTI_MODEL_LAYERS,
-    MULTI_INPUT_DIM,
-    MULTI_L2_LAMBDA,
+    MAX_EPOCHS,
+    MODEL_DIR,
+    MODEL_PATH,
+    NORM_STATS_PATH,
+    NUM_FOURIER,
+    SEED,
+    VAL_RATIO,
+    WEIGHT_DECAY,
 )
-from preprocessing import get_training_set, get_unified_training_set
+from model import MicrostripMLP
+from preprocessing import build_datasets
 
 
-def setup_gpu():
-    """配置 GPU 内存按需增长，避免一次性占满显存。"""
-    gpus = tf.config.experimental.list_physical_devices("GPU")
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-        except RuntimeError as e:
-            print(e)
+def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
-def create_model(input_dim, hidden_layers, l2_lambda):
-    """根据输入维度和隐藏层配置创建全连接网络。"""
-    regularizer = l2(l2_lambda)
-    layers = [
-        Dense(
-            hidden_layers[0],
-            activation="relu",
-            input_shape=(input_dim,),
-            kernel_regularizer=regularizer,
-        )
-    ]
-    for units in hidden_layers[1:]:
-        layers.append(Dense(units, activation="relu", kernel_regularizer=regularizer))
-    layers.append(Dense(4))
+class EarlyStopper:
+    """监控 val_loss,patience 个 epoch 没改善就停,并保留 best weights。"""
 
-    model = Sequential(layers)
-    model.compile(
-        loss=tf.keras.losses.MeanSquaredError(),
-        optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
+    def __init__(self, patience: int, min_delta: float = 1e-6) -> None:
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best = float("inf")
+        self.best_state: dict[str, torch.Tensor] | None = None
+
+    def step(self, val_loss: float, model: nn.Module) -> bool:
+        if val_loss < self.best - self.min_delta:
+            self.best = val_loss
+            self.counter = 0
+            self.best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            return False
+        self.counter += 1
+        return self.counter >= self.patience
+
+    def restore(self, model: nn.Module) -> None:
+        if self.best_state is not None:
+            model.load_state_dict(self.best_state)
+
+
+def train_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    loss_fn: nn.Module,
+    device: torch.device,
+) -> float:
+    model.train()
+    total, n = 0.0, 0
+    for geo, freq, target in loader:
+        geo = geo.to(device, non_blocking=True)
+        freq = freq.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
+        optimizer.zero_grad()
+        pred = model(geo, freq)
+        loss = loss_fn(pred, target)
+        loss.backward()
+        optimizer.step()
+        bs = geo.size(0)
+        total += loss.item() * bs
+        n += bs
+    return total / n
+
+
+@torch.no_grad()
+def eval_loss(
+    model: nn.Module,
+    loader: DataLoader,
+    loss_fn: nn.Module,
+    device: torch.device,
+) -> float:
+    model.eval()
+    total, n = 0.0, 0
+    for geo, freq, target in loader:
+        geo = geo.to(device, non_blocking=True)
+        freq = freq.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
+        pred = model(geo, freq)
+        bs = geo.size(0)
+        total += loss_fn(pred, target).item() * bs
+        n += bs
+    return total / n
+
+
+def main() -> None:
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+    device = get_device()
+    print(f"Device: {device}")
+
+    print("Loading data...")
+    train_ds, val_ds, stats = build_datasets(seed=SEED, val_ratio=VAL_RATIO)
+    print(f"Train: {len(train_ds):,} | Val: {len(val_ds):,}")
+
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+
+    model = MicrostripMLP(
+        geo_dim=GEO_DIM,
+        num_fourier=NUM_FOURIER,
+        hidden_layers=HIDDEN_LAYERS,
+    ).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Model params: {n_params:,}")
+
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
-    return model
+    loss_fn = nn.MSELoss()
+    stopper = EarlyStopper(patience=EARLY_STOPPING_PATIENCE)
 
+    history = {"train_loss": [], "val_loss": []}
+    start = time.time()
 
-def train_single_model(save_dir=MODEL_DIR):
-    """单模型模式：一个模型学习所有频率点。"""
-    os.makedirs(save_dir, exist_ok=True)
+    for epoch in range(1, MAX_EPOCHS + 1):
+        train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
+        val_loss = eval_loss(model, val_loader, loss_fn, device)
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
 
-    print("加载统一训练数据（频率作为第 5 输入）...")
-    X, Z, feat_mean, feat_std, freq_mean, freq_std = get_unified_training_set()
-    print(f"训练数据 — X: {X.shape}, Z: {Z.shape}")
+        print(f"Epoch {epoch:3d} | train={train_loss:.6f} | val={val_loss:.6f}")
 
-    model = create_model(SINGLE_INPUT_DIM, SINGLE_MODEL_LAYERS, SINGLE_L2_LAMBDA)
-    model.summary()
+        if stopper.step(val_loss, model):
+            print(f"Early stop @ epoch {epoch} (best val={stopper.best:.6f})")
+            break
 
-    early_stopping = EarlyStopping(
-        monitor="val_loss",
-        patience=EARLY_STOPPING_PATIENCE,
-        restore_best_weights=True,
+    stopper.restore(model)
+    elapsed = time.time() - start
+    print(f"\nTotal time: {elapsed:.1f}s")
+
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    torch.save(
+        {"model_state": model.state_dict(), "config": model.export_config()},
+        MODEL_PATH,
     )
+    np.savez(NORM_STATS_PATH, **stats)
+    print(f"Saved model: {MODEL_PATH}")
+    print(f"Saved stats: {NORM_STATS_PATH}")
 
-    model.fit(
-        X,
-        Z,
-        batch_size=BATCH_SIZE,
-        epochs=MAX_EPOCHS,
-        callbacks=[early_stopping],
-        validation_split=VALIDATION_SPLIT,
-    )
-
-    model.save(SINGLE_MODEL_PATH)
-    print(f"模型已保存: {SINGLE_MODEL_PATH}")
-
-    # 保存标准化参数，评估时需要
-    np.savez(
-        NORMALIZATION_STATS_PATH,
-        feat_mean=feat_mean,
-        feat_std=feat_std,
-        freq_mean=np.array(freq_mean),
-        freq_std=np.array(freq_std),
-    )
-    print(f"标准化参数已保存: {NORMALIZATION_STATS_PATH}")
-
-    # 抽样预测对比
-    sample_idx = np.random.choice(len(X), 5, replace=False)
-    predictions = model.predict(X[sample_idx])
-    print(f"真实值 (抽样):\n{Z[sample_idx]}")
-    print(f"预测值 (抽样):\n{predictions}")
-
-
-def train_multi_models(save_dir=MODEL_DIR):
-    """多模型模式：训练 NUM_MODELS 个独立模型。"""
-    os.makedirs(save_dir, exist_ok=True)
-
-    datasets = [get_training_set(i) for i in range(NUM_MODELS)]
-    early_stopping = EarlyStopping(
-        monitor="val_loss",
-        patience=EARLY_STOPPING_PATIENCE,
-        restore_best_weights=True,
-    )
-
-    for i in range(NUM_MODELS):
-        x_train, Z = datasets[i]
-        model = create_model(MULTI_INPUT_DIM, MULTI_MODEL_LAYERS, MULTI_L2_LAMBDA)
-
-        print(f"\n===== 训练模型 {i + 1}/{NUM_MODELS} =====")
-        model.fit(
-            x_train,
-            Z,
-            batch_size=BATCH_SIZE,
-            epochs=MAX_EPOCHS,
-            callbacks=[early_stopping],
-            validation_split=VALIDATION_SPLIT,
-        )
-
-        model_path = os.path.join(save_dir, f"model_{i + 1}.h5")
-        model.save(model_path)
-        print(f"模型已保存: {model_path}")
-
-        predictions = model.predict(x_train)
-        print(f"模型 {i + 1} - 真实值 (前5行):\n{Z[:5]}")
-        print(f"模型 {i + 1} - 预测值 (前5行):\n{predictions[:5]}")
+    plt.figure(figsize=(10, 5))
+    plt.plot(history["train_loss"], label="train")
+    plt.plot(history["val_loss"], label="val")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
+    plt.yscale("log")
+    plt.legend()
+    plt.title("Training Curve")
+    plt.tight_layout()
+    curve_path = os.path.join(MODEL_DIR, "training_curve.png")
+    plt.savefig(curve_path)
+    print(f"Saved curve: {curve_path}")
 
 
 if __name__ == "__main__":
-    setup_gpu()
-    start_time = time.time()
-
-    if MODEL_MODE == "single":
-        print("训练模式: 单模型（频率作为输入）")
-        train_single_model()
-    else:
-        print("训练模式: 多模型（20 个独立模型）")
-        train_multi_models()
-
-    elapsed = time.time() - start_time
-    print(f"\n总训练时间: {elapsed:.2f} 秒")
+    main()
