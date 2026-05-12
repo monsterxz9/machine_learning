@@ -125,9 +125,7 @@ def main() -> None:
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {n_params:,}")
 
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
-    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     loss_fn = nn.MSELoss()
     stopper = EarlyStopper(patience=EARLY_STOPPING_PATIENCE)
 

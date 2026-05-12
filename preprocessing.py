@@ -24,7 +24,7 @@ from config import (
 def csv_to_numpy(csv_path: str) -> np.ndarray:
     """读 CSV 为 float32 数组,跳过非数字 header。"""
     data: list[list[float]] = []
-    with open(csv_path, "r") as f:
+    with open(csv_path) as f:
         reader = csv.reader(f)
         for row_idx, row in enumerate(reader):
             if not row:

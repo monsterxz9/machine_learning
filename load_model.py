@@ -10,7 +10,6 @@ from config import MODEL_DIR, MODEL_PATH, NORM_STATS_PATH, NUM_TEST_CASES
 from get_test_data import load_test_features, load_test_s_params
 from model import MicrostripMLP
 
-
 LABELS = ["S11.real", "S11.imag", "S12.real", "S12.imag"]
 
 

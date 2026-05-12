@@ -6,7 +6,6 @@ import os
 import sys
 import tempfile
 
-import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -40,10 +39,7 @@ def test_model_backward_has_grad():
     out = model(torch.randn(16, 4), torch.randn(16))
     loss = nn.functional.mse_loss(out, torch.randn(16, 4))
     loss.backward()
-    has_grad = any(
-        p.grad is not None and p.grad.abs().sum().item() > 0
-        for p in model.parameters()
-    )
+    has_grad = any(p.grad is not None and p.grad.abs().sum().item() > 0 for p in model.parameters())
     assert has_grad
 
 

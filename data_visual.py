@@ -5,7 +5,6 @@ import numpy as np
 
 from preprocessing import load_features
 
-
 FEATURE_NAMES = ["W", "L", "H", "Er"]
 FEATURE_COLORS = ["r", "g", "b", "grey"]
 

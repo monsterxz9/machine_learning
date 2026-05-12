@@ -9,15 +9,9 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 FEATURE_CSV_PATH = os.environ.get(
     "FEATURE_CSV_PATH", os.path.join(PROJECT_ROOT, "data", "mline_size.csv")
 )
-TRAIN_S2P_DIR = os.environ.get(
-    "TRAIN_S2P_DIR", os.path.join(PROJECT_ROOT, "data", "s2p")
-)
-TEST_CSV_PATH = os.environ.get(
-    "TEST_CSV_PATH", os.path.join(PROJECT_ROOT, "data", "test.csv")
-)
-TEST_S2P_DIR = os.environ.get(
-    "TEST_S2P_DIR", os.path.join(PROJECT_ROOT, "data", "CaseData")
-)
+TRAIN_S2P_DIR = os.environ.get("TRAIN_S2P_DIR", os.path.join(PROJECT_ROOT, "data", "s2p"))
+TEST_CSV_PATH = os.environ.get("TEST_CSV_PATH", os.path.join(PROJECT_ROOT, "data", "test.csv"))
+TEST_S2P_DIR = os.environ.get("TEST_S2P_DIR", os.path.join(PROJECT_ROOT, "data", "CaseData"))
 MODEL_DIR = os.environ.get("MODEL_DIR", os.path.join(PROJECT_ROOT, "model"))
 
 

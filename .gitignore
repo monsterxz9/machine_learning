@@ -1,36 +1,31 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
-
-# 训练模型文件（体积较大）
-model/*.h5
-model/*.pt
-
-# 生成的图片
-*.png
-
-# IDE
-.idea/
-.vscode/
-*.swp
-
-# 环境
-.env
-venv/
 *.egg-info/
 
-# 数据目录（按需添加）
-data/
-
-# OS
-.DS_Store
-Thumbs.db
-
+# 虚拟环境
 .venv/
+venv/
+.env
+
+# 训练产物(体积大)
+model/*.pt
 *.npz
+*.png
+
+# 数据
+data/
 *.zip
 微带线赛题数据/
 
-# pytest / ruff caches
+# 工具缓存
 .pytest_cache/
 .ruff_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
